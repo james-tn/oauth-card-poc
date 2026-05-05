@@ -24,8 +24,8 @@ source "$SCRIPT_DIR/../.env"
 PROVIDER_ID="8379c6d2-b262-4d4f-b89b-68dc5b5f5482"  # oauth2generic
 SUB="$(az account show --query id -o tsv)"
 
-AUTHORIZE_URL="https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/authorize"
-TOKEN_URL="https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token"
+AUTHORIZE_URL="https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+TOKEN_URL="https://login.microsoftonline.com/common/oauth2/v2.0/token"
 
 TOKEN="$(az account get-access-token --query accessToken -o tsv)"
 

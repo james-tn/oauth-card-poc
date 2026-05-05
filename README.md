@@ -1,353 +1,323 @@
-# OAuth Card POC — Generic OAuth 2 vs. the magic-code prompt
+# OAuth Card POC — Multi-tenant ISV variant
 
-A minimal, end-to-end reproduction that proves whether **Generic OAuth 2** for a
-Bot Framework Custom Engine Agent in Microsoft Teams produces the dreaded
-**6-digit magic-code prompt** during sign-in, or completes silently.
+> ⚠️ This is the **multi-tenant** branch. For the single-tenant baseline that
+> proves Generic OAuth 2 doesn't inherently produce a magic code, see
+> [README.singletenant.md](README.singletenant.md) (or branch `master`).
 
-## TL;DR — Result
+## What this branch proves
 
-> ✅ **Generic OAuth 2 does NOT inherently produce a magic code in Teams.**
-> Silent token-exchange (`signin/tokenExchange` invoke) completes cleanly when
-> the bot, the OAuth Connection, the Teams manifest, and the IdP app
-> registration are configured correctly.
+The single-tenant POC answered the question *"is the magic-code prompt
+inherent to Generic OAuth 2?"* — **No.**
 
-If your users see a magic-code prompt, it is a **misconfiguration symptom**, not
-a Generic OAuth 2 limitation. Jump to [Diagnosis checklist](#diagnosis-checklist-for-magic-code-symptoms)
-to figure out which part of your configuration is broken.
+This branch answers the next, more business-critical question:
 
-## Why this POC exists
+> **"Can an ISV publish a Custom Engine Agent to Teams, have a customer in a
+> completely different tenant install it, and have customer-tenant users sign
+> in via OAuth — with the ISV backend reliably knowing which customer org each
+> user belongs to?"**
 
-A real customer scenario:
-- Their Teams custom-engine agent's bot uses a "Generic OAuth 2" Bot Service
-  connection pointing at the customer's own IdP (not Entra).
-- Users were prompted for a 6-digit magic code on sign-in.
-- The Microsoft team suspected misconfiguration; the customer suspected the
-  Generic OAuth 2 connection type.
+✅ **Yes**, with the right configuration. This branch demonstrates the full
+pattern end-to-end:
 
-This POC settles the question by **reproducing the exact pattern in your own
-tenant**, but pointing the Generic OAuth 2 connection at Entra so you don't
-need a separate IdP. The result is a green-path silent sign-in — proof that
-the protocol path itself works.
+- The bot lives in the **ISV's tenant** (e.g., `0fbe7234`, playing the role of
+  Veeam / Paychex Inc.)
+- The customer **side-loads the same Teams app package** into their own tenant
+  (e.g., `microsoft.com`, playing the role of any customer org). This is
+  identical to what Teams Marketplace install does — just without the
+  publication step.
+- A native customer-tenant user (e.g., `someone@microsoft.com`) chats with the
+  bot and clicks Sign In.
+- They authenticate against **their own home tenant's** Entra (not the ISV's
+  tenant). On first use they see a one-time consent prompt (auto-creates the
+  app's service principal in their tenant — exactly what marketplace install
+  does).
+- The bot receives a token whose `tid`/`upn`/`iss` claims **prove the user's
+  home org** to the ISV backend, cryptographically.
+
+## How this differs from the single-tenant POC
+
+Four targeted changes; everything else is identical:
+
+| # | Setting | Single-tenant (master) | Multi-tenant (this branch) |
+|---|---|---|---|
+| 1 | AAD app `signInAudience` | `AzureADMyOrg` | **`AzureADMultipleOrgs`** |
+| 2 | OAuth Connection authorize/token URL | `/{tenant}/oauth2/v2.0/...` | **`/common/oauth2/v2.0/...`** |
+| 3 | Where the Teams app is sideloaded | ISV tenant | **Customer tenant** |
+| 4 | Who signs in | User in ISV tenant | **User native to customer tenant** |
+
+The Bot Service itself stays SingleTenant (in the ISV tenant). That's
+internal to how Bot Service authenticates *to your bot endpoint* using your
+bot's app credentials; it's unrelated to user authentication. (Microsoft
+deprecated `--app-type MultiTenant` for new bots; the supported pattern today
+is SingleTenant Bot + multi-tenant AAD app, exactly what we use here.)
 
 ## Architecture
 
 ```
-┌─────────────┐   1. user types        ┌──────────────────┐
-│  Teams      │──────────────────────▶ │  Bot Framework   │
-│  desktop    │   "hello"               │  channel         │
-└─────────────┘                        └────────┬─────────┘
-       ▲                                        │ 2. forward to
-       │                                        ▼
-       │                              ┌──────────────────┐
-       │                              │  Container App   │  bot/app.py
-       │  6. card displayed           │  (Python)        │
-       │                              │                  │
-       │                              │  uses OAuthPrompt│
-       │                              │  with conn name  │
-       │                              │  "entra-as-…"    │
-       │                              └────────┬─────────┘
-       │                                        │ 3. GetSignInResource
-       │                                        ▼
-       │                          ┌────────────────────────────┐
-       │                          │  api.botframework.com      │
-       │                          │  Bot Service OAuth         │
-       │                          │  Connection                │
-       │                          │  (Generic OAuth 2 →        │
-       │                          │   Entra v2 endpoint)       │
-       │                          └────────────┬───────────────┘
-       │                                        │ 4. signed sign-in URL
-       │                                        ▼
-       │                          ┌────────────────────────────┐
-       │  5. user authenticates   │  login.microsoftonline.com │
-       └──────────────────────────│  (acting as the IdP)        │
-              in popup            └─────────────┬──────────────┘
-                                                 │
-                                                 ▼
-                                  signin/tokenExchange invoke
-                                  back to the bot → token →
-                                  bot replies with claims
-```
-
-## Repo layout
-
-```
-oauth-card-poc/
-├── README.md                    ← you are here
-├── .env.example                 ← copy to .env and fill in the inputs
-├── .gitignore
-├── bot/
-│   ├── app.py                   ← single-file aiohttp bot, OAuthPrompt
-│   ├── pyproject.toml
-│   └── Dockerfile
-├── infra/
-│   ├── 01-create-aad-app.sh     ← single-tenant AAD app + secret + identifierUri
-│   ├── 02-create-test-user.sh   ← non-admin user in your tenant for sign-in
-│   ├── 03-create-bot-service.sh ← Azure Bot (F0) + Teams channel
-│   ├── 04-create-oauth-connection.sh ← Generic OAuth 2 connection (the tricky one)
-│   ├── 05-deploy-container-app.sh    ← ACR build + Container Apps deploy
-│   └── 06-build-manifest.sh     ← Teams app manifest + zip
-└── manifest/
-    ├── manifest.json            ← generated
-    ├── color.png  outline.png   ← placeholder icons
-    └── oauth-poc-app.zip        ← generated, side-load this in Teams
+ISV TENANT (0fbe7234)                     CUSTOMER TENANT (microsoft.com)
+──────────────────────                    ──────────────────────────────
+                                          ┌────────────────────────────┐
+┌────────────────────┐                    │  Teams desktop / web       │
+│  Container App     │                    │  signed in as someone@…    │
+│  (bot/app.py)      │ ◀──── 1. activity ─┤  microsoft.com             │
+│  uses OAuthPrompt  │   from msteams     └─────────────┬──────────────┘
+│                    │                                  │
+│  Bot AAD app:      │                                  │ user types
+│  multi-tenant      │                                  │ "hello"
+│  signInAudience:   │                                  ▼
+│  AzureADMultiple…  │                       ┌─────────────────────────┐
+└────────┬───────────┘                       │  Bot Framework channel  │
+         │                                   │  (token.botframework)   │
+         │ 2. GetSignInResource              └─────────────┬───────────┘
+         ▼                                                 │
+┌─────────────────────┐                                    │
+│  Bot Service OAuth  │ ───── 3. signed sign-in URL ──────┤
+│  Connection         │                                    │
+│  authorize URL =    │                                    ▼
+│  …/COMMON/oauth2/v2 │                       ┌────────────────────────┐
+└─────────────────────┘                       │  user clicks "Sign In" │
+                                              │  popup opens to        │
+                                              │  login.microsoftonline │
+                                              │  .com/COMMON/...       │
+                                              └────────────┬───────────┘
+                                                           │ 4. Entra detects
+                                                           │ user's home tenant
+                                                           ▼
+                                              ┌────────────────────────┐
+                                              │  Sign-in at user's     │
+                                              │  HOME tenant           │
+                                              │  (microsoft.com)       │
+                                              │                        │
+                                              │  First time: consent   │
+                                              │  prompt → SP created   │
+                                              │  in customer tenant    │
+                                              └────────────┬───────────┘
+                                                           │ 5. token
+                                                           │ tid: 72f988bf-…
+                                                           │ upn: someone@microsoft.com
+                                                           ▼
+                                              ┌────────────────────────┐
+ISV TENANT                                    │  signin/tokenExchange  │
+                                              │  invoke back to bot    │
+┌────────────────────┐                        └────────────┬───────────┘
+│  bot decodes JWT   │ ◀─────── 6. token ─────────────────┘
+│  sees user's       │
+│  customer-tenant   │
+│  identity claims   │
+└────────────────────┘
 ```
 
 ## Prerequisites
 
-- Azure tenant + subscription where you have the Application Administrator
-  and Owner roles (the POC creates an AAD app, a test user, an Azure Bot
-  resource, and a Container App).
-- A Microsoft 365 tenant where you can side-load custom Teams apps. You can
-  use the same tenant as Azure or a different one (the user signing in does
-  NOT need to be in the bot's tenant — that is the entire point of the POC).
-- Tools installed locally:
-  ```bash
-  az --version           # Azure CLI 2.60+
-  gh --version           # GitHub CLI (only if you fork/push)
-  docker --version       # not strictly needed - we use ACR Tasks
-  python3 --version      # 3.11+
-  zip
-  ```
+In addition to the [single-tenant prereqs](README.singletenant.md#prerequisites):
+
+- A **second tenant** to play the customer role. Most easily, use any other
+  M365 tenant where you have permission to side-load custom apps. (If you
+  don't have one, your personal `*.microsoft.com` Teams account works as the
+  customer; the ISV bot is in `*.onmicrosoft.com`.)
+- The **second-tenant user must NOT be a guest** in the ISV tenant — they
+  should be a native member of the customer tenant. (If they're a guest, you
+  end up with a same-tenant scenario and don't actually exercise the
+  cross-tenant OAuth path.)
 
 ## Step-by-step setup
 
-### 1. Clone & configure inputs
+### A. ISV side — provision the bot (one-time)
+
+If you haven't already provisioned from `master`, do these once in your **ISV
+tenant**:
 
 ```bash
-git clone https://github.com/james-tn/oauth-card-poc.git
+git clone https://github.com/james-tn/oauth-card-poc.git -b multitenant
 cd oauth-card-poc
 cp .env.example .env
-```
+# edit .env with your ISV tenant's TENANT_ID, SUBSCRIPTION_ID, etc.
 
-Edit `.env` and fill in **only the input fields** at the top (everything below
-`# ---- Filled in by infra/01..05 scripts ----` is populated by the scripts):
+az login --tenant <ISV_TENANT_ID>
+az account set --subscription <ISV_SUBSCRIPTION_ID>
 
-```bash
-TENANT_ID=<your-azure-tenant-guid>
-SUBSCRIPTION_ID=<your-azure-subscription-guid>
-TENANT_DOMAIN=<your-tenant>.onmicrosoft.com
-LOCATION=eastus2
-RESOURCE_GROUP=oauth-card-poc-rg
-BOT_DISPLAY_NAME="OAuth POC"
-BOT_AAD_APP_NAME=oauth-poc-bot-app
-BOT_HANDLE=oauthpocbot01           # 4-42 chars, [a-zA-Z0-9_-], unique in your sub
-OAUTH_CONNECTION_NAME=entra-as-generic
-TEST_USER_DISPLAY_NAME="OAuth POC Test User"
-TEST_USER_UPN_PREFIX=oauthpoctest  # final UPN: oauthpoctest@<tenant-domain>
-BOT_PORT=8080
-CAE_ENV_NAME=oauth-poc-cae-env
-CAE_APP_NAME=oauthpocbotapp        # 2-32 chars, lowercase + hyphen
-CAE_LOCATION=eastus2
-```
-
-### 2. Sign in to Azure
-
-```bash
-az login --tenant <TENANT_ID>
-az account set --subscription <SUBSCRIPTION_ID>
-```
-
-If your tenant enforces Conditional Access with MFA on the management plane,
-you may need to satisfy the claims challenge:
-
-```bash
-az login --tenant <TENANT_ID> \
-    --scope "https://management.core.windows.net//.default" \
-    --claims-challenge "eyJhY2Nlc3NfdG9rZW4iOnsiYWNycyI6eyJlc3NlbnRpYWwiOnRydWUsInZhbHVlcyI6WyJwMSJdfX19" \
-    --use-device-code
-```
-
-### 3. Run the provisioning scripts in order
-
-Each script is idempotent-ish (safe to re-run, but the first failure usually
-needs you to clean up and re-run from that step).
-
-```bash
 cd infra
-bash 01-create-aad-app.sh           # AAD app + client secret + api://botid-… URI + redirect URI
-bash 02-create-test-user.sh         # Non-admin user in your tenant
-bash 03-create-bot-service.sh       # Azure Bot resource + Teams channel
-bash 04-create-oauth-connection.sh  # ⚠ THE FRAGILE STEP — see "Pitfalls" below
-bash 05-deploy-container-app.sh     # ACR build + Container Apps deploy
-bash 06-build-manifest.sh           # Teams manifest + oauth-poc-app.zip
+bash 01-create-aad-app.sh           # multi-tenant AAD app
+bash 02-create-test-user.sh         # optional — only used for the single-tenant test
+bash 03-create-bot-service.sh
+bash 04-create-oauth-connection.sh  # uses /common/ endpoints in this branch
+bash 05-deploy-container-app.sh
+bash 06-build-manifest.sh
 ```
 
-After each script, look at `.env` — values like `BOT_APP_ID`, `BOT_APP_SECRET`,
-`TEST_USER_PASSWORD`, `BOT_URL` will be appended.
+If you already provisioned the single-tenant version, you only need to:
 
-### 4. Side-load the app into Teams
+```bash
+# Flip AAD app to multi-tenant
+az ad app update --id "$BOT_APP_ID" --sign-in-audience AzureADMultipleOrgs
 
-1. In Teams, open **Apps → Manage your apps → Upload an app → Upload a custom app**.
-2. Pick `manifest/oauth-poc-app.zip`.
-3. Add the bot to a personal chat.
-
-### 5. Run the test
-
-In the chat, type:
-
-```
-hello
+# Recreate the OAuth connection with /common/ endpoints
+bash infra/04-create-oauth-connection.sh
 ```
 
-You should get an OAuth Card titled **"Please sign in"** with an active
-**Sign In** button.
+That's literally the only ISV-side change. The bot code, Container App, and
+manifest are identical.
 
-Click **Sign In**. A popup window should appear at
-`login.microsoftonline.com`. Sign in as the test user (or any user in your
-bot's tenant — credentials are in your `.env` after step 02). The popup
-should close on its own and the bot should respond with the decoded JWT
-claims:
+### B. Customer side — install and use the app
+
+Switch hats: now you are the customer. Get the Teams app package from the
+ISV (the `manifest/oauth-poc-app.zip` you built in step A6).
+
+> In production this happens via Teams Marketplace ("Get it now" → installs
+> into the customer tenant). For the POC we simulate that with a side-load,
+> which has identical downstream behavior — Teams, Bot Framework, and Entra
+> can't tell the difference.
+
+1. Sign in to Teams (web or desktop) **as a native user of your customer
+   tenant** (e.g. `someone@microsoft.com` for the Microsoft tenant).
+2. **Apps → Manage your apps → Upload an app → Upload a custom app** → pick
+   `oauth-poc-app.zip`.
+3. Open the bot in a personal chat.
+4. Type `hello`.
+
+### C. The first sign-in (the consent moment)
+
+Click **Sign In**. A popup opens at `login.microsoftonline.com/common/...`.
+
+Because your AAD app is multi-tenant and is being used in a tenant that has
+never seen it before, Entra shows a **consent screen** the very first time:
+
+> *"Permissions requested — OAuth POC by [your ISV name] would like to:
+> Sign you in and read your profile. Read your basic profile."*
+
+Click **Accept**. Behind the scenes Entra:
+
+1. Creates an enterprise-app service principal for your AAD app in the
+   customer tenant.
+2. Grants the consented scopes.
+3. Issues a token.
+4. Redirects the popup back to Bot Service, which closes the popup and fires
+   `signin/tokenExchange` to the bot.
+
+In production, an ISV typically does this consent once via the *org-wide
+admin-consent URL* on behalf of all users in the customer tenant, so end
+users never see the prompt at all. For the POC, the per-user prompt is fine.
+
+### D. Verify the token's claims
+
+The bot replies with the decoded JWT. The critical fields:
 
 ```json
 {
-  "aud": "00000003-0000-0000-c000-000000000000",
-  "iss": "https://sts.windows.net/<tenant-id>/",
-  "name": "...",
-  "upn": "...",
-  "tid": "...",
-  "scp": "openid profile User.Read email",
-  "appid": "<your-bot-app-id>"
+  "tid": "72f988bf-86f1-41af-91ab-2d7cd011db47",     ← CUSTOMER tenant id (microsoft.com)
+  "iss": "https://sts.windows.net/72f988bf-…/",      ← Issued BY customer tenant
+  "upn": "someone@microsoft.com",                     ← Customer-tenant UPN
+  "appid": "43f717ae-…",                              ← ISV's bot AAD app id
+  "scp": "openid profile User.Read email"
 }
 ```
 
-If you got the claims back **without typing a magic code**, the silent
-token-exchange flow worked — same conclusion as the POC.
+Note that `tid` (issuer) is the **customer's** tenant id, while `appid` (the
+client) is the **ISV's** AAD app id. This is the proof that:
 
-### 6. Reset / iterate
+- ✅ The customer-tenant user signed into their own home tenant
+- ✅ The token was minted by the customer's Entra
+- ✅ The ISV's backend can identify which customer the user belongs to from
+      `tid` alone — no shared secret, no provisioning step needed
+- ✅ The signature on the token is verifiable against the customer's tenant
+      keys (so the ISV backend can trust these claims)
 
-The bot supports two utility commands inside the chat:
+## What this maps to in the Paychex / Paycor scenario
 
-- `/reset` — cancels any in-flight OAuth dialog (use after a failed click)
-- `/logout` — signs the user out via `UserTokenClient.sign_out_user`
-
-To redeploy the bot after editing `bot/app.py`, re-run only step 5:
-
-```bash
-bash infra/05-deploy-container-app.sh
-```
-
-## Pitfalls — exactly what bit us, and how to avoid them
-
-### 1. The Generic OAuth 2 connection silently accepts an incomplete config
-
-`oauth2generic` (Bot Service service-provider GUID
-`8379c6d2-b262-4d4f-b89b-68dc5b5f5482`) requires **eleven** parameters, not
-three. Most "how to set up a Generic OAuth 2 connection" examples online show
-only `AuthorizationUrl` / `TokenUrl` / `RefreshUrl`, which are actually keys
-for the simpler `oauth2` provider.
-
-If you only supply the three URL params:
-- ARM PUT returns **201**.
-- The connection appears in the Azure portal as healthy.
-- `provisioningState` is `"Succeeded"`.
-- But when the user clicks **Sign In** in Teams, Bot Service responds with
-  `{"error":{"code":"ServiceError","message":"An error occured while
-  retrieving the signin link"}}` because it cannot construct the authorize
-  URL from the missing query-string template.
-
-Required parameter set (see `infra/04-create-oauth-connection.sh`):
-
-| Key | Notes |
+| ISV (Veeam / Paychex Inc.) | This POC |
 |---|---|
-| `ClientId` / `ClientSecret` | Your IdP app registration's client id + secret |
-| `ScopeListDelimiter` | Almost always `" "` (space) |
-| `AuthorizationUrlTemplate` | e.g. `https://login.acme.com/oauth2/authorize` |
-| `AuthorizationUrlQueryStringTemplate` | `?client_id={ClientId}&response_type=code&redirect_uri={RedirectUrl}&scope={Scopes}&state={State}` |
-| `TokenUrlTemplate` | e.g. `https://login.acme.com/oauth2/token` |
-| `TokenUrlQueryStringTemplate` | `""` (empty) for most IdPs |
-| `TokenBodyTemplate` | `code={Code}&grant_type=authorization_code&redirect_uri={RedirectUrl}&client_id={ClientId}&client_secret={ClientSecret}` |
-| `RefreshUrlTemplate` | usually same as TokenUrl |
-| `RefreshUrlQueryStringTemplate` | `""` |
-| `RefreshBodyTemplate` | `refresh_token={RefreshToken}&grant_type=refresh_token&client_id={ClientId}&client_secret={ClientSecret}` |
+| Veeam's Azure tenant where the bot AAD app + Bot Service live | `0fbe7234` |
+| Veeam's bot Container App | `oauthpocbotapp` |
+| Customer org installing the app from marketplace (e.g., a Veeam customer) | side-load into `microsoft.com` |
+| Customer-tenant end user signing in | `someone@microsoft.com` |
+| ISV backend learning user's home org from token claims | `bot/app.py` decoding JWT and seeing `tid` / `upn` |
 
-**`az bot connection create --service Oauth2`** does NOT work cleanly here.
-The script uses a direct ARM REST PUT to bypass the CLI normalization
-that strips/re-cases parameters.
+The exact same pattern works whether the IdP is:
+- **Entra** (this POC, via `/common/`) — works for any Entra customer
+- **A non-Entra IdP the customer brings** (e.g., Paycor's HCM IdP) — would
+  use a per-customer OAuth Connection instead of `/common/`, but everything
+  else stays identical
 
-### 2. The IdP's redirect URI must be exactly Bot Service's callback
+## Pitfalls specific to multi-tenant
 
-Add this to your IdP app registration:
+In addition to the [single-tenant pitfalls](README.singletenant.md#pitfalls--exactly-what-bit-us-and-how-to-avoid-them):
+
+### 1. The customer user must NOT be a B2B guest in the ISV tenant
+
+If you invite the customer user as a guest in the ISV tenant (so they can chat
+with a single-tenant bot via guest access), you'll observe sign-in working
+fine — but the token's `tid` will be the **ISV** tenant, not the customer
+tenant. That's because as a guest, they're effectively a member of the ISV
+tenant for that interaction.
+
+To prove cross-tenant OAuth, you need the user to be a native member of the
+customer tenant **and never have accepted a B2B invite into the ISV tenant**.
+
+### 2. First-time consent UX
+
+The very first time a user from a new customer tenant signs in, they get the
+Entra consent screen. This is normal for multi-tenant apps and **is not** the
+magic code prompt — it's a one-time "Accept" click that creates the service
+principal in their tenant. Users don't see it again on subsequent sign-ins.
+
+If your real ISV scenario can't tolerate per-user consent, generate the
+admin-consent URL once per customer:
 
 ```
-https://token.botframework.com/.auth/web/redirect
+https://login.microsoftonline.com/{customer-tenant-id}/adminconsent
+    ?client_id={ISV-bot-app-id}
+    &redirect_uri=https://your-ack-page
 ```
 
-Anything else — even a different scheme or trailing slash — and the silent
-token-exchange callback fails, falling back to the magic-code prompt.
+The customer's tenant admin clicks once, all subsequent users sign in
+silently.
 
-### 3. `validDomains` in the Teams manifest must list every host in the auth chain
+### 3. Don't request scopes that need admin consent without admin consent
 
-At minimum:
+Scopes like `User.Read.All`, `Mail.Read`, etc. require tenant-admin consent.
+Requesting them in the OAuth Connection's scope list will block end-user
+self-consent — they'll see "approval required" or get sent into an error
+loop. Stick to user-consentable scopes (`openid profile User.Read email`)
+unless you've negotiated admin-consent with the customer.
 
-```json
-"validDomains": [
-  "<your IdP login host>",
-  "token.botframework.com",
-  "login.microsoftonline.com"   // include if your IdP federates with Entra
-]
-```
+### 4. `/common/` vs `/organizations/` vs `/{customer-tenant-id}/`
 
-Missing entries are textbook causes of the magic-code fallback.
+| Endpoint | Who can sign in | Use when |
+|---|---|---|
+| `/common/` | Any Entra org user OR Microsoft personal account (MSA) | True multi-tenant, accept anyone |
+| `/organizations/` | Any Entra org user, NO personal accounts | Multi-tenant but org-only (no consumer Microsoft accounts) |
+| `/{tenant-id}/` | Only users in that specific tenant | Single-tenant or per-customer OAuth connection |
 
-### 4. After `/logout`, the OAuthPrompt dialog stays in conversation state
+This POC uses `/common/`. For a real ISV that knows it only sells to
+businesses, `/organizations/` is slightly safer (rejects MSA users).
 
-A subtle bot-code bug we hit: if you only call `sign_out_user` on logout
-without also `cancel_all_dialogs`, the next `hello` from the user is consumed
-by the still-pending OAuthPrompt as a failed magic-code attempt — silently —
-and no new card is sent. Always reset:
+## Diagnosis checklist for ISV multi-tenant issues
 
-```python
-async def _sign_out(self, turn_context):
-    dc = await self._dialogs.create_context(turn_context)
-    await dc.cancel_all_dialogs()                        # ← critical
-    await token_client.sign_out_user(...)
-    await turn_context.send_activity("Signed out.")
-```
+If a customer reports the app doesn't work after install:
 
-### 5. Use `OAuthPrompt` (or equivalent) from a current SDK
-
-Hand-rolled OAuth handling, or older botbuilder versions that do not process
-the `signin/tokenExchange` invoke activity, **always** fall back to magic
-code. There is no way around it without an SDK that handles the silent
-exchange invoke.
-
-### 6. `webApplicationInfo` is NOT required for the OAuth Card flow
-
-A red herring this POC initially chased: a greyed-out **Sign In** button does
-NOT mean the manifest is missing `webApplicationInfo`. The Teams client
-greys out the button while the popup launch is in flight (state="loading").
-Our successful run was on a manifest **without** `webApplicationInfo`.
-
-`webApplicationInfo` IS required for **SSO token exchange** (`getAuthToken`
-silent flow inside Teams) — different feature, different code path. Add it if
-you do SSO; not required for the OAuth Card click-to-popup flow.
-
-## Diagnosis checklist for magic-code symptoms
-
-If you are seeing magic-code prompts in production, check, in this order:
-
-1. **Is the IdP app registration's redirect URI exactly
-   `https://token.botframework.com/.auth/web/redirect`?**
-2. **Does the Teams manifest's `validDomains` include every host that the
-   redirect chain touches** (including any auth/redirect domains the IdP
-   itself uses)?
-3. **Is the bot using `OAuthPrompt` from a current SDK that handles
-   `signin/tokenExchange`?** (Hand-rolled OAuth always falls back.)
-4. **If your connection is `oauth2generic`, are all 11 template parameters
-   populated** — especially the body templates that govern how Bot Service
-   POSTs to the IdP's token endpoint?
-5. **Capture a network trace** of `/api/oauth/PostSignInCallback` and the
-   subsequent `signin/tokenExchange` invoke — that pinpoints exactly which
-   step is failing.
+1. **Did they consent?** Check Entra admin center → Enterprise applications
+   in their tenant → search for your AAD app's name. If it's not there, the
+   user closed the consent prompt. They need to retry sign-in and click Accept.
+2. **Are they actually a native user of their tenant?** Check `upn` claim — if
+   it has `#EXT#`, they're a B2B guest of some other tenant.
+3. **Is your AAD app's `signInAudience` `AzureADMultipleOrgs` (or
+   `AzureADandPersonalMicrosoftAccount`)?**
+   ```bash
+   az ad app show --id $BOT_APP_ID --query signInAudience -o tsv
+   ```
+4. **Is the OAuth Connection's authorize URL using `/common/` or
+   `/organizations/`?** A `/{specific-tenant}/` URL will only work for that
+   one tenant.
+5. **Are the requested scopes user-consentable?** If you need admin-only
+   scopes, the customer tenant admin must consent first.
 
 ## Cleanup
 
 ```bash
+# In ISV tenant
 az group delete --name oauth-card-poc-rg --yes --no-wait
 az ad app delete --id "$BOT_APP_ID"
-az ad user delete --id "$TEST_USER_UPN"
+
+# In each customer tenant where the app was consented:
+# Entra admin center → Enterprise applications → find the app → Delete
 ```
-
-## License
-
-POC code, MIT.

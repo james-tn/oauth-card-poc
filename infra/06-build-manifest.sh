@@ -29,7 +29,7 @@ cat > "${MANIFEST_DIR}/manifest.json" <<JSON
 {
   "\$schema": "https://developer.microsoft.com/json-schemas/teams/v1.19/MicrosoftTeams.schema.json",
   "manifestVersion": "1.19",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "id": "${MANIFEST_ID}",
   "developer": {
     "name": "OAuth POC",
