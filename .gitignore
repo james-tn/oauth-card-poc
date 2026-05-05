@@ -1,0 +1,22 @@
+# Secrets / local state — never commit
+.env
+.env.local
+*.pem
+*.pfx
+
+# Build artifacts
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+manifest/*.zip
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Generated artifacts (rebuild via scripts)
+manifest/manifest.json
+bot/*.egg-info/
