@@ -1,8 +1,17 @@
 # OAuth Card POC — Multi-tenant ISV variant
 
-> ⚠️ This is the **multi-tenant** branch. For the single-tenant baseline that
-> proves Generic OAuth 2 doesn't inherently produce a magic code, see
-> [README.singletenant.md](README.singletenant.md) (or branch `master`).
+> ⚠️ This is the **multi-tenant** branch.
+>
+> - For the architectural background and design guidance, see
+>   [multi-tenant-isv-architecture.md](multi-tenant-isv-architecture.md).
+> - For the single-tenant baseline POC that proves Generic OAuth 2 doesn't
+>   inherently produce a magic code, see [README.singletenant.md](README.singletenant.md)
+>   (or branch `master`).
+>
+> **What this README is.** A runnable proof of the architecture document above.
+> In ~30 minutes you'll have a real ISV-tenant bot that a different-tenant
+> user can sign into, with the bot showing the customer-tenant identity
+> claims back to you.
 
 ## What this branch proves
 
@@ -20,7 +29,7 @@ This branch answers the next, more business-critical question:
 pattern end-to-end:
 
 - The bot lives in the **ISV's tenant** (e.g., `0fbe7234`, playing the role of
-  Veeam / Paychex Inc.)
+  any ISV's Azure tenant).
 - The customer **side-loads the same Teams app package** into their own tenant
   (e.g., `microsoft.com`, playing the role of any customer org). This is
   identical to what Teams Marketplace install does — just without the
@@ -222,74 +231,79 @@ client) is the **ISV's** AAD app id. This is the proof that:
 - ✅ The signature on the token is verifiable against the customer's tenant
       keys (so the ISV backend can trust these claims)
 
-## What this maps to in the Paychex / Paycor scenario
+## How this maps to a real ISV deployment
 
-| ISV (Veeam / Paychex Inc.) | This POC |
+| ISV-side (your tenant) | This POC |
 |---|---|
-| Veeam's Azure tenant where the bot AAD app + Bot Service live | `0fbe7234` |
-| Veeam's bot Container App | `oauthpocbotapp` |
-| Customer org installing the app from marketplace (e.g., a Veeam customer) | side-load into `microsoft.com` |
-| Customer-tenant end user signing in | `someone@microsoft.com` |
-| ISV backend learning user's home org from token claims | `bot/app.py` decoding JWT and seeing `tid` / `upn` |
+| Your Azure tenant where the bot's AAD app + Bot Service live | `0fbe7234` (the example ISV tenant in this POC) |
+| Your bot's Container App / Functions / App Service | `oauthpocbotapp` |
+| Customer org installing the app via Teams Marketplace | side-load into a different M365 tenant (`microsoft.com` in the POC walkthrough) |
+| Customer-tenant end user signing in | any native user of that customer tenant |
+| Your backend learning the user's home org from token claims | `bot/app.py` decoding the JWT and reading `tid` / `upn` / `iss` |
 
 The exact same pattern works whether the IdP is:
 - **Entra** (this POC, via `/common/`) — works for any Entra customer
-- **A non-Entra IdP the customer brings** (e.g., Paycor's HCM IdP) — would
-  use a per-customer OAuth Connection instead of `/common/`, but everything
-  else stays identical
+- **A non-Entra IdP the customer brings** (e.g., a customer's HCM, CRM, or
+  legacy OIDC IdP) — would use a per-customer OAuth Connection instead of
+  `/common/`, but everything else stays identical
 
-## Pitfalls specific to multi-tenant
+See [multi-tenant-isv-architecture.md §6](multi-tenant-isv-architecture.md#6-common-variations)
+for the variations.
 
-In addition to the [single-tenant pitfalls](README.singletenant.md#pitfalls--exactly-what-bit-us-and-how-to-avoid-them):
+## Pitfalls when running this POC
 
-### 1. The customer user must NOT be a B2B guest in the ISV tenant
+The architecture doc has the [full list of multi-tenant ISV pitfalls](multi-tenant-isv-architecture.md#7-pitfalls-and-how-to-avoid-them).
+Here are the ones that bit us specifically while running this POC, plus the
+[single-tenant pitfalls](README.singletenant.md#pitfalls--exactly-what-bit-us-and-how-to-avoid-them)
+that all carry over.
 
-If you invite the customer user as a guest in the ISV tenant (so they can chat
-with a single-tenant bot via guest access), you'll observe sign-in working
-fine — but the token's `tid` will be the **ISV** tenant, not the customer
-tenant. That's because as a guest, they're effectively a member of the ISV
-tenant for that interaction.
+### 1. Stale Bot Framework token cache
 
-To prove cross-tenant OAuth, you need the user to be a native member of the
+If you tested as User A and then re-test as User B in the same conversation,
+OAuthPrompt may return User A's cached token without prompting. **Always type
+`/logout` in the bot before re-testing**, especially after switching the
+identity you're signing in as.
+
+### 2. Browser Entra session cookie auto-completing the popup
+
+Because the popup opens to `/common/`, Entra silently uses whatever Entra
+session cookie the browser already has. If you previously authenticated as
+the wrong user in another tab, the popup may complete silently with that
+identity — the bot reports the wrong claims and there's no obvious error.
+
+To force account selection:
+- Open `https://login.microsoftonline.com/common/oauth2/v2.0/logout` in a
+  new tab to clear all Entra sessions, OR
+- Use a fresh incognito window for Teams web, OR
+- In Teams desktop, sign out and back in as the intended account
+
+### 3. The customer user must NOT be a B2B guest in the ISV tenant
+
+If you invite the customer user as a guest in the ISV tenant (so they can
+chat with a single-tenant bot via guest access), you'll see sign-in succeed
+— but the token's `tid` will be the **ISV** tenant, not the customer tenant.
+That's because as a guest, they're effectively a member of the ISV tenant
+for that interaction.
+
+For real cross-tenant OAuth, the user must be a native member of the
 customer tenant **and never have accepted a B2B invite into the ISV tenant**.
 
-### 2. First-time consent UX
+### 4. First-time consent UX is normal, not an error
 
-The very first time a user from a new customer tenant signs in, they get the
-Entra consent screen. This is normal for multi-tenant apps and **is not** the
-magic code prompt — it's a one-time "Accept" click that creates the service
-principal in their tenant. Users don't see it again on subsequent sign-ins.
+The very first time a user from a new customer tenant signs in, they get
+the Entra consent screen. This is normal for multi-tenant apps and **is not**
+the magic code prompt — it's a one-time "Accept" click that creates the
+service principal in their tenant. Users don't see it again on subsequent
+sign-ins.
 
-If your real ISV scenario can't tolerate per-user consent, generate the
-admin-consent URL once per customer:
+If your real ISV scenario can't tolerate per-user consent, the customer's
+tenant admin can pre-consent on behalf of all users:
 
 ```
 https://login.microsoftonline.com/{customer-tenant-id}/adminconsent
-    ?client_id={ISV-bot-app-id}
+    ?client_id={your-bot-aad-app-id}
     &redirect_uri=https://your-ack-page
 ```
-
-The customer's tenant admin clicks once, all subsequent users sign in
-silently.
-
-### 3. Don't request scopes that need admin consent without admin consent
-
-Scopes like `User.Read.All`, `Mail.Read`, etc. require tenant-admin consent.
-Requesting them in the OAuth Connection's scope list will block end-user
-self-consent — they'll see "approval required" or get sent into an error
-loop. Stick to user-consentable scopes (`openid profile User.Read email`)
-unless you've negotiated admin-consent with the customer.
-
-### 4. `/common/` vs `/organizations/` vs `/{customer-tenant-id}/`
-
-| Endpoint | Who can sign in | Use when |
-|---|---|---|
-| `/common/` | Any Entra org user OR Microsoft personal account (MSA) | True multi-tenant, accept anyone |
-| `/organizations/` | Any Entra org user, NO personal accounts | Multi-tenant but org-only (no consumer Microsoft accounts) |
-| `/{tenant-id}/` | Only users in that specific tenant | Single-tenant or per-customer OAuth connection |
-
-This POC uses `/common/`. For a real ISV that knows it only sells to
-businesses, `/organizations/` is slightly safer (rejects MSA users).
 
 ## Diagnosis checklist for ISV multi-tenant issues
 
@@ -321,3 +335,10 @@ az ad app delete --id "$BOT_APP_ID"
 # In each customer tenant where the app was consented:
 # Entra admin center → Enterprise applications → find the app → Delete
 ```
+
+## See also
+
+- [multi-tenant-isv-architecture.md](multi-tenant-isv-architecture.md) — the
+  vendor-neutral architecture this POC implements
+- [README.singletenant.md](README.singletenant.md) — the single-tenant
+  baseline POC and Generic OAuth 2 reference

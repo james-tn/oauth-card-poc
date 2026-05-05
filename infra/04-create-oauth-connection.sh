@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Create the Bot Service OAuth Connection that turns Entra into a "Generic OAuth 2"
-# IdP from the bot's perspective. Mirrors what Paycor configures against their
-# own non-Entra IdP, just pointing at Entra so we don't need a separate provider.
+# IdP from the bot's perspective. The same pattern works for any third-party
+# OAuth 2 IdP (HCM, CRM, etc.) — we point at Entra here so the POC doesn't need
+# a separate provider, but the Generic OAuth 2 connection schema is identical.
 #
 # IMPORTANT FINDINGS:
 #  1. Use the `oauth2generic` (id 8379c6d2-...) service provider. The simpler
