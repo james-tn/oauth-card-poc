@@ -105,8 +105,16 @@ class OAuthPocDialog(WaterfallDialog):
 
 
 def _decode_jwt_claims(token: str) -> str:
-    """Extract a few readable claims from a JWT. POC: no validation."""
+    """Pretty-print useful identity claims from a JWT.
+
+    Falls back to a short opaque-token summary when the IdP returned an
+    opaque access token (GitHub, Auth0 reference tokens, etc.) instead
+    of a JWT. POC: no signature validation.
+    """
     import base64
+
+    if token.count(".") != 2:
+        return f"(opaque access token, length={len(token)} — IdP did not return a JWT)"
 
     try:
         _h, payload_b64, _s = token.split(".")

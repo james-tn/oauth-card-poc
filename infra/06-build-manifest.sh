@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
-# Builds the Teams app manifest from template and zips it.
+# Builds the unified Microsoft 365 app manifest from template, generates
+# placeholder icons, and zips the package for sideloading.
+#
+# The output package surfaces the same bot in BOTH:
+#   - Teams chat            via `bots[]`
+#   - M365 Copilot CEA      via `copilotAgents.customEngineAgents[]`
+#
+# Uses manifestVersion `devPreview` because `customEngineAgents` is currently
+# in public preview and not in the GA 1.19/1.20 schemas.
+
 set -euo pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -16,20 +25,22 @@ if [[ -z "${BOT_URL}" || -z "${BOT_APP_ID}" ]]; then
 fi
 
 HOST="$(echo "${BOT_URL}" | sed -e 's|https://||')"
+MANIFEST_VERSION="${MANIFEST_VERSION:-1.0.0}"
 
 # Stable manifest GUID derived from app id
 MANIFEST_ID="${MANIFEST_ID:-$(python3 -c "import uuid; print(uuid.uuid5(uuid.NAMESPACE_DNS, 'oauth-card-poc:${BOT_APP_ID}'))")}"
 
 echo "==> Building manifest"
-echo "    bot id:      ${BOT_APP_ID}"
-echo "    host:        ${HOST}"
-echo "    manifest id: ${MANIFEST_ID}"
+echo "    bot id:           ${BOT_APP_ID}"
+echo "    host:             ${HOST}"
+echo "    manifest id:      ${MANIFEST_ID}"
+echo "    manifest version: ${MANIFEST_VERSION}"
 
 cat > "${MANIFEST_DIR}/manifest.json" <<JSON
 {
-  "\$schema": "https://developer.microsoft.com/json-schemas/teams/v1.19/MicrosoftTeams.schema.json",
-  "manifestVersion": "1.19",
-  "version": "1.0.0",
+  "\$schema": "https://developer.microsoft.com/json-schemas/teams/vDevPreview/MicrosoftTeams.schema.json",
+  "manifestVersion": "devPreview",
+  "version": "${MANIFEST_VERSION}",
   "id": "${MANIFEST_ID}",
   "developer": {
     "name": "OAuth POC",
@@ -42,8 +53,8 @@ cat > "${MANIFEST_DIR}/manifest.json" <<JSON
     "full": "OAuth Card POC Bot"
   },
   "description": {
-    "short": "Tests Generic OAuth 2 magic-code behavior in Teams",
-    "full": "Sends a Generic OAuth 2 sign-in card to verify whether silent token-exchange completion works in Teams + M365 Copilot, or whether the magic-code fallback appears."
+    "short": "Generic OAuth 2 sign-in demo for Teams + M365 Copilot",
+    "full": "Demonstrates OAuth Card sign-in via a Generic OAuth 2 Bot Service connection. Surfaces the same bot in Teams chat and Microsoft 365 Copilot Custom Engine Agents."
   },
   "icons": {
     "outline": "outline.png",
@@ -58,6 +69,14 @@ cat > "${MANIFEST_DIR}/manifest.json" <<JSON
       "isNotificationOnly": false
     }
   ],
+  "copilotAgents": {
+    "customEngineAgents": [
+      {
+        "id": "${BOT_APP_ID}",
+        "type": "bot"
+      }
+    ]
+  },
   "permissions": ["identity"],
   "validDomains": [
     "${HOST}",
@@ -87,8 +106,8 @@ def make_png(path, width, height, rgb):
     with open(path, 'wb') as f:
         f.write(png)
 md = os.environ['MANIFEST_DIR']
-make_png(os.path.join(md, 'color.png'), 192, 192, (0, 120, 212))   # blue
-make_png(os.path.join(md, 'outline.png'), 32, 32, (255, 255, 255)) # white
+make_png(os.path.join(md, 'color.png'), 192, 192, (0, 120, 212))
+make_png(os.path.join(md, 'outline.png'), 32, 32, (255, 255, 255))
 PY
 fi
 
@@ -101,4 +120,4 @@ ls -la oauth-poc-app.zip
 echo
 echo "==> Done"
 echo "    Package: ${MANIFEST_DIR}/oauth-poc-app.zip"
-echo "    Sideload via: Teams → Apps → Manage your apps → Upload an app"
+echo "    Sideload via: Teams or M365 Copilot → Apps → Upload a custom app"
