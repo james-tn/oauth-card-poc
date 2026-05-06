@@ -27,9 +27,9 @@ echo "    manifest id: ${MANIFEST_ID}"
 
 cat > "${MANIFEST_DIR}/manifest.json" <<JSON
 {
-  "\$schema": "https://developer.microsoft.com/json-schemas/teams/v1.19/MicrosoftTeams.schema.json",
-  "manifestVersion": "1.19",
-  "version": "1.0.0",
+  "\$schema": "https://developer.microsoft.com/json-schemas/teams/vDevPreview/MicrosoftTeams.schema.json",
+  "manifestVersion": "devPreview",
+  "version": "1.0.105",
   "id": "${MANIFEST_ID}",
   "developer": {
     "name": "OAuth POC",
@@ -58,6 +58,14 @@ cat > "${MANIFEST_DIR}/manifest.json" <<JSON
       "isNotificationOnly": false
     }
   ],
+  "copilotAgents": {
+    "customEngineAgents": [
+      {
+        "id": "${BOT_APP_ID}",
+        "type": "bot"
+      }
+    ]
+  },
   "permissions": ["identity"],
   "validDomains": [
     "${HOST}",
