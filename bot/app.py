@@ -13,6 +13,7 @@ Design intent — what we are testing:
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ from botbuilder.core import (
     ActivityHandler,
     ConversationState,
     MemoryStorage,
+    MessageFactory,
     TurnContext,
     UserState,
 )
@@ -43,7 +45,14 @@ from botbuilder.integration.aiohttp import (
     CloudAdapter,
     ConfigurationBotFrameworkAuthentication,
 )
-from botbuilder.schema import Activity, ActivityTypes
+from botbuilder.schema import (
+    Activity,
+    ActivityTypes,
+    ActionTypes,
+    Attachment,
+    CardAction,
+    OAuthCard,
+)
 from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
@@ -179,6 +188,18 @@ class OAuthPocBot(ActivityHandler):
             await self._reset_dialogs(turn_context)
             await turn_context.send_activity("Dialog state reset. Send any message to start over.")
             return
+        if text == "/showurl":
+            await self._show_signin_url(turn_context)
+            return
+        if text.startswith("/manualcard"):
+            # /manualcard               → uses real channel_id (control)
+            # /manualcard webchat       → mangled channel_id="webchat"
+            # /manualcard directline    → mangled channel_id="directline"
+            # /manualcard unknown       → mangled channel_id="unknown"
+            parts = text.split(maxsplit=1)
+            override = parts[1].strip() if len(parts) > 1 else None
+            await self._send_manual_oauth_card(turn_context, override_channel_id=override)
+            return
         await self._run_dialog(turn_context)
 
     async def on_token_response_event(self, turn_context: TurnContext):
@@ -226,6 +247,70 @@ class OAuthPocBot(ActivityHandler):
         dialog_context = await self._dialogs.create_context(turn_context)
         await dialog_context.cancel_all_dialogs()
         log.info("_reset_dialogs: cancelled all dialogs")
+
+    async def _show_signin_url(self, turn_context: TurnContext):
+        """Dump the sign-in URL that OAuthPrompt would generate, for inspection."""
+        from botframework.connector.auth import UserTokenClient
+        token_client: UserTokenClient = turn_context.turn_state.get("UserTokenClient")
+        if not token_client:
+            await turn_context.send_activity("UserTokenClient not in turn_state.")
+            return
+        resource = await token_client.get_sign_in_resource(
+            CONNECTION_NAME, turn_context.activity, ""
+        )
+        link = getattr(resource, "sign_in_link", None) or getattr(resource, "signInLink", "")
+        log.info("/showurl: channel_id=%s sign_in_link=%s",
+                 turn_context.activity.channel_id, link)
+        await turn_context.send_activity(
+            f"channel_id: `{turn_context.activity.channel_id}`\n\n"
+            f"sign_in_link:\n```\n{link}\n```"
+        )
+
+    async def _send_manual_oauth_card(self, turn_context: TurnContext,
+                                       override_channel_id: str | None = None):
+        """Send an OAuthCard manually (bypassing OAuthPrompt).
+
+        If override_channel_id is set, calls get_sign_in_resource with a copy
+        of the activity whose channel_id has been mangled. This tests whether
+        the channel_id propagated to BF affects PostSignInCallback rendering
+        (postMessage variant vs static-code variant).
+        """
+        from botframework.connector.auth import UserTokenClient
+        token_client: UserTokenClient = turn_context.turn_state.get("UserTokenClient")
+        if not token_client:
+            await turn_context.send_activity("UserTokenClient not in turn_state.")
+            return
+
+        activity_for_resource = turn_context.activity
+        if override_channel_id:
+            activity_for_resource = copy.deepcopy(turn_context.activity)
+            original = activity_for_resource.channel_id
+            activity_for_resource.channel_id = override_channel_id
+            log.info("/manualcard: mangled channel_id %s → %s", original, override_channel_id)
+
+        resource = await token_client.get_sign_in_resource(
+            CONNECTION_NAME, activity_for_resource, ""
+        )
+        link = getattr(resource, "sign_in_link", None) or getattr(resource, "signInLink", "")
+        log.info("/manualcard: channel_id=%s link=%s",
+                 activity_for_resource.channel_id, link)
+
+        oauth_card = OAuthCard(
+            text=f"Sign in (manual card, channel_id={activity_for_resource.channel_id})",
+            connection_name=CONNECTION_NAME,
+            buttons=[
+                CardAction(
+                    type=ActionTypes.signin,
+                    title="Sign In",
+                    value=link,
+                ),
+            ],
+        )
+        attachment = Attachment(
+            content_type="application/vnd.microsoft.card.oauth",
+            content=oauth_card.serialize() if hasattr(oauth_card, "serialize") else oauth_card,
+        )
+        await turn_context.send_activity(MessageFactory.attachment(attachment))
 
 
 # ---- aiohttp wiring ----
