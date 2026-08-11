@@ -267,12 +267,49 @@ reports `subChannel = COPILOT`, Teams reports none.
 
 ---
 
-## Other SDK notes for 1.5.184
+## SDK version notes
 
-- `IStreamingResponse` has **no `AddAttachment`** in this version. To put a card on a
-  streamed message you must set `FinalMessage` — and `CreateFinalMessage` only
-  auto-populates `Text` when `FinalMessage` is `null`, so setting it will **silently drop
-  your streamed text** unless you carry it across yourself. See `CitationLab.cs`.
+Measured on **1.5.184**. Verified against **1.6.150** and **1.7.129** where noted.
+
+### Do not enable streaming on 1.5.x
+
+In 1.5.184 `AgentState` has **no synchronisation** — `CachedAgentState.State` is a plain
+`Dictionary<string, object>` and reads of state quietly mutate it. Under concurrent or
+streaming workloads this corrupts the dictionary and throws inside `SaveChangesAsync`:
+
+```text
+System.ArgumentException: An item with the same key has already been added.
+   at Microsoft.Agents.Core.Serialization.TypeExtensions.AddTypeInfo(...)
+   at Microsoft.Agents.Storage.MemoryStorage.WriteAsync(...)
+   at Microsoft.Agents.Builder.State.AgentState.SaveChangesAsync(...)
+```
+
+Tracked as [#841](https://github.com/microsoft/Agents-for-net/issues/841), reported
+against 1.5.184 and **fixed in 1.6.150** by switching to lock-based concurrency (zero
+`lock` statements in 1.5.184, twelve in 1.6.150).
+
+Streaming is the trigger condition, so **upgrade to 1.6.150+ before adopting the
+streaming fixes in this sample.** Note in particular that `OutboundTrace.cs` registers an
+`OnSendActivities` handler: it deliberately reads only the activity and never touches
+`AgentState`, which is safe. If you extend it to read turn state, you will hit #841 on
+1.5.x.
+
+### `AddAttachment` and `FinalMessage`
+
+- `IStreamingResponse` has **no `AddAttachment`** until **1.7.x**. On 1.5 and 1.6 the only
+  way to put a card on a streamed message is to set `FinalMessage`.
+- `CreateFinalMessage` only auto-populates `Text` when `FinalMessage` is `null`, so
+  setting it **silently drops your streamed text** unless you carry it across yourself.
+  This is **unchanged in 1.7.129** — `AddAttachment` just means you rarely need
+  `FinalMessage` any more. See `CitationLab.cs`.
+
+### Unchanged across versions
+
+- The `ReplyToId` / `ApplyConversationReference` behaviour described above is identical in
+  1.5.184 and 1.7.129. Upgrading neither introduces nor fixes it.
+
+### Other limits
+
 - Citations are capped at 20 per message.
 - Adaptive Cards are not rendered inside the citation pop-up itself.
 
