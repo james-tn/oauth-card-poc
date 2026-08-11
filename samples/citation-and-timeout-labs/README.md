@@ -26,6 +26,10 @@ else in the app.
 | `/slow proactive 60` — ack, then deliver out-of-turn | completes cleanly | **clean** |
 | `/cite card` — `[1]` inside the Adaptive Card | not clickable | **not clickable** |
 | `/cite both` — `[1]` in message `Text`, card attached | clickable | **clickable** |
+| `/cite stream17` — streamed + `AddAttachment` (1.7 only) | clickable | **clickable** |
+
+Every row was first measured on **1.5.184** and then re-measured on **1.7.129**, from the
+same deployment, with the same account. Results were identical on both versions.
 
 ---
 
@@ -255,7 +259,8 @@ values.
 | `/cite text` | Message `Text` with `[1]` + citation entity (control) |
 | `/cite card` | Adaptive Card only, `[1]` inside a `TextBlock` — **the broken shape** |
 | `/cite both` | `[1]` in message `Text` **and** card attached — **the fix** |
-| `/cite stream` | Streamed response with `AddCitation` + `FinalMessage` |
+| `/cite stream` | Streamed response with `AddCitation` + `FinalMessage` (1.5/1.6 path) |
+| `/cite stream17` | Streamed response with `AddCitation` + `AddAttachment` (needs 1.7+) |
 | `/slow naive <sec>` | Block, then reply once |
 | `/slow typing <sec>` | Typing indicator, then block |
 | `/slow stream <sec>` | Streamed text chunks |
@@ -269,7 +274,8 @@ reports `subChannel = COPILOT`, Teams reports none.
 
 ## SDK version notes
 
-Measured on **1.5.184**. Verified against **1.6.150** and **1.7.129** where noted.
+This sample targets **1.7.129**. Every finding was first measured on **1.5.184** and then
+re-measured on 1.7.129; the rendering results are identical on both.
 
 ### Do not enable streaming on 1.5.x
 
@@ -289,10 +295,10 @@ against 1.5.184 and **fixed in 1.6.150** by switching to lock-based concurrency 
 `lock` statements in 1.5.184, twelve in 1.6.150).
 
 Streaming is the trigger condition, so **upgrade to 1.6.150+ before adopting the
-streaming fixes in this sample.** Note in particular that `OutboundTrace.cs` registers an
-`OnSendActivities` handler: it deliberately reads only the activity and never touches
-`AgentState`, which is safe. If you extend it to read turn state, you will hit #841 on
-1.5.x.
+streaming fixes in this sample** — which is why this sample now targets 1.7.129. Note in
+particular that `OutboundTrace.cs` registers an `OnSendActivities` handler: it
+deliberately reads only the activity and never touches `AgentState`, which is safe. If you
+extend it to read turn state, you will hit #841 on 1.5.x.
 
 ### `AddAttachment` and `FinalMessage`
 
@@ -301,7 +307,29 @@ streaming fixes in this sample.** Note in particular that `OutboundTrace.cs` reg
 - `CreateFinalMessage` only auto-populates `Text` when `FinalMessage` is `null`, so
   setting it **silently drops your streamed text** unless you carry it across yourself.
   This is **unchanged in 1.7.129** — `AddAttachment` just means you rarely need
-  `FinalMessage` any more. See `CitationLab.cs`.
+  `FinalMessage` any more. Compare `/cite stream` with `/cite stream17` in
+  `CitationLab.cs`: the 1.7 version is shorter and has no way to lose the text.
+- When a streamed message carries an attachment, Microsoft 365 Copilot renders the card
+  as its own block beneath the streamed text. That is client-side rendering of a **single**
+  activity — `OutboundTrace` confirms one outbound `message` with `attachments=1`.
+
+### What upgrading costs
+
+We bumped this agent from 1.5.184 straight to 1.7.129. It uses a custom
+`IUserAuthorization` handler, OAuth with an OBO exchange, `ProcessProactiveAsync`,
+streaming with citations, Teams invokes and `FileConsentCard`, and a hand-rolled ASP.NET
+auth extension.
+
+**It compiled with zero source changes**, with one advisory deprecation:
+
+```text
+warning CS0618: 'AgentApplication.OnActivity(RouteSelector, RouteHandler, ...)' is obsolete:
+  use AddRoute(Route) or AddRoute(RouteSelector, RouteHandler, ...) instead.
+```
+
+1.7 moves Teams routing into a new `Microsoft.Agents.Extensions.MSTeams` package, so some
+migration was expected — it did not materialise for the Teams APIs used here. Your surface
+area may differ, but treat this as a package bump rather than a migration.
 
 ### Unchanged across versions
 

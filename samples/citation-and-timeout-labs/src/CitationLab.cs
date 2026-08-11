@@ -42,9 +42,10 @@ public static class CitationLab
     public static string Help =>
         "**Citation lab** - which shapes produce a *clickable* citation?\n\n" +
         "- `/cite text` - message Text with `[1]` + citation entity (control)\n" +
-        "- `/cite card` - Adaptive Card only, `[1]` inside a TextBlock (current customer shape)\n" +
+        "- `/cite card` - Adaptive Card only, `[1]` inside a TextBlock (the broken shape)\n" +
         "- `/cite both` - message Text with `[1]` + citation entity **and** the card attached (candidate fix)\n" +
-        "- `/cite stream` - streamed response using `AddCitation` + `AddAttachment` (modern supported path)";
+        "- `/cite stream` - streamed response, card attached via `FinalMessage` (the 1.5.x-era path)\n" +
+        "- `/cite stream17` - streamed response, card attached via `AddAttachment` (requires SDK >= 1.6)";
 
     public static async Task HandleAsync(ITurnContext ctx, ILogger log, string variant, CancellationToken ct)
     {
@@ -63,6 +64,9 @@ public static class CitationLab
                 break;
             case "stream":
                 await SendStreamedAsync(ctx, log, ct);
+                break;
+            case "stream17":
+                await SendStreamedWithAddAttachmentAsync(ctx, log, ct);
                 break;
             default:
                 await ctx.SendActivityAsync(MessageFactory.Text(Help), ct);
@@ -182,6 +186,42 @@ public static class CitationLab
         {
             var result = await stream.EndStreamAsync(ct);
             log.LogInformation("[CiteLab] variant=stream endStreamResult={Result} updatesSent={Updates}",
+                result, stream.UpdatesSent());
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Variant 5: streamed, but the card is attached with AddAttachment instead
+    // of FinalMessage. AddAttachment does not exist in 1.5.184; it was added in
+    // 1.6.x and is present in 1.7.129. It sidesteps the FinalMessage text-drop
+    // trap entirely, because the streamed text is still auto-carried when
+    // FinalMessage is left null.
+    private static async Task SendStreamedWithAddAttachmentAsync(ITurnContext ctx, ILogger log, CancellationToken ct)
+    {
+        var stream = ctx.StreamingResponse;
+
+        try
+        {
+            log.LogInformation("[CiteLab] variant=stream17 isStreamingChannel={IsStreaming}", stream.IsStreamingChannel);
+
+            await stream.QueueInformativeUpdateAsync("Looking up active employees...", ct);
+
+            stream.QueueTextChunk("**Active employees**\n\n");
+            await Task.Delay(400, ct);
+            stream.QueueTextChunk("- Ada Lovelace - Engineering\n");
+            await Task.Delay(400, ct);
+            stream.QueueTextChunk("- Grace Hopper - Engineering\n");
+            await Task.Delay(400, ct);
+            stream.QueueTextChunk("- Katherine Johnson - Finance\n\n");
+            stream.QueueTextChunk("Source: employee directory [1]");
+
+            stream.AddCitation(BuildClientCitation());
+            stream.AddAttachment(BuildEmployeeCard(includeCitationMarker: false));
+        }
+        finally
+        {
+            var result = await stream.EndStreamAsync(ct);
+            log.LogInformation("[CiteLab] variant=stream17 endStreamResult={Result} updatesSent={Updates}",
                 result, stream.UpdatesSent());
         }
     }
